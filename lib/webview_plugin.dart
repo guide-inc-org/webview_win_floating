@@ -1,8 +1,9 @@
 import 'dart:developer';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
-import 'package:webview_win_floating/webview.dart';
+import 'webview_win_floating.dart';
 
 class WindowsWebViewPlatform extends WebViewPlatform {
   /// Registers this class as the default instance of [WebViewPlatform].
@@ -54,8 +55,8 @@ class WindowsPlatformNavigationDelegate extends PlatformNavigationDelegate {
   UrlChangedCallback? onUrlChange;
 
   WindowsPlatformNavigationDelegate(
-    PlatformNavigationDelegateCreationParams params,
-  ) : super.implementation(params);
+    super.params,
+  ) : super.implementation();
 
   @override
   Future<void> setOnNavigationRequest(
@@ -116,8 +117,7 @@ class WindowsPlatformWebViewWidgetCreationParams
 }
 
 class WindowsPlatformWebViewWidget extends PlatformWebViewWidget {
-  WindowsPlatformWebViewWidget(PlatformWebViewWidgetCreationParams params)
-      : super.implementation(params);
+  WindowsPlatformWebViewWidget(super.params) : super.implementation();
 
   @override
   Widget build(BuildContext context) {
@@ -139,10 +139,24 @@ class WindowsWebViewControllerCreationParams
   final String? userDataFolder;
   final bool suspendDuringDeactive;
 
+  /// Additional browser arguments to pass to WebView2 environment.
+  /// Useful for proxy configuration, e.g., '--proxy-server=host:port'
+  /// See: https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/webview-features-flags
+  final String? additionalBrowserArguments;
+
+  /// Proxy authentication username (for BasicAuth proxy)
+  final String? proxyUsername;
+
+  /// Proxy authentication password (for BasicAuth proxy)
+  final String? proxyPassword;
+
   /// Creates a new [WindowsPlatformWebViewControllerCreationParams] instance.
   const WindowsWebViewControllerCreationParams({
     this.userDataFolder,
     this.suspendDuringDeactive = true,
+    this.additionalBrowserArguments,
+    this.proxyUsername,
+    this.proxyPassword,
   }) : super();
 
   /// Creates a [WindowsPlatformWebViewControllerCreationParams] instance based on [PlatformWebViewControllerCreationParams].
@@ -331,6 +345,14 @@ class WindowsPlatformWebViewController extends PlatformWebViewController {
 
   Future<void> setStatusBar(bool isEnable) {
     return controller.setStatusBar(isEnable);
+  }
+
+  Future<void> setVisibility(bool isVisible) {
+    return controller.setVisibility(isVisible);
+  }
+
+  Future<Uint8List?> capturePreview() {
+    return controller.capturePreview();
   }
 }
 

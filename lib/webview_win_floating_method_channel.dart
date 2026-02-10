@@ -131,11 +131,17 @@ class MethodChannelWebviewWinFloating extends WebviewWinFloatingPlatform {
     int webviewId, {
     String? initialUrl,
     String? userDataFolder,
+    String? additionalBrowserArguments,
+    String? proxyUsername,
+    String? proxyPassword,
   }) async {
     return await methodChannel.invokeMethod<bool>('create', {
           "webviewId": webviewId,
           "url": initialUrl ?? "",
           "userDataFolder": userDataFolder ?? "",
+          "additionalBrowserArguments": additionalBrowserArguments ?? "",
+          "proxyUsername": proxyUsername ?? "",
+          "proxyPassword": proxyPassword ?? "",
         }) ??
         false;
   }
@@ -406,5 +412,13 @@ class MethodChannelWebviewWinFloating extends WebviewWinFloatingPlatform {
       "webviewId": webviewId,
       "isEnable": isEnable,
     });
+  }
+
+  @override
+  Future<Uint8List?> capturePreview(int webviewId) async {
+    final result = await methodChannel.invokeMethod<Uint8List>('capturePreview', {
+      "webviewId": webviewId,
+    });
+    return result;
   }
 }

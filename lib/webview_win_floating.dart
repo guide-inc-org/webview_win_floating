@@ -1,19 +1,16 @@
-export 'webview_plugin.dart';
-
 import 'dart:async';
-import 'dart:convert';
 import 'dart:developer';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:fullscreen_window/fullscreen_window.dart';
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
-import 'package:webview_win_floating/webview_plugin.dart';
-
 import 'layout_notify_widget.dart';
+import 'webview_plugin.dart';
 import 'webview_win_floating_platform_interface.dart';
 
+
+export 'webview_plugin.dart';
 class WinNavigationDelegate {
   final NavigationRequestCallback? onNavigationRequest;
   final PageEventCallback? onPageStarted;
@@ -142,8 +139,7 @@ typedef AskPermissionCallback = bool Function(
 class WinWebViewWidget extends StatefulWidget {
   final WinWebViewController controller;
 
-  const WinWebViewWidget({Key? key, required this.controller})
-      : super(key: key);
+  const WinWebViewWidget({super.key, required this.controller});
 
   @override
   State<StatefulWidget> createState() => _WinWebViewWidgetState();
@@ -164,7 +160,7 @@ class _WinWebViewWidgetState extends State<WinWebViewWidget> {
     if (widget.controller.params.suspendDuringDeactive) {
       widget.controller._resume();
     } else {
-      widget.controller._setVisibility(true);
+      widget.controller.setVisibility(true);
     }
   }
 
@@ -174,7 +170,7 @@ class _WinWebViewWidgetState extends State<WinWebViewWidget> {
     if (widget.controller.params.suspendDuringDeactive) {
       widget.controller._suspend();
     } else {
-      widget.controller._setVisibility(false);
+      widget.controller.setVisibility(false);
     }
   }
 
@@ -251,6 +247,9 @@ class WinWebViewController {
       _webviewId,
       initialUrl: null,
       userDataFolder: this.params.userDataFolder,
+      additionalBrowserArguments: this.params.additionalBrowserArguments,
+      proxyUsername: this.params.proxyUsername,
+      proxyPassword: this.params.proxyPassword,
     );
   }
 
@@ -447,7 +446,7 @@ class WinWebViewController {
     }
   }
 
-  Future<void> _setVisibility(bool isVisible) async {
+  Future<void> setVisibility(bool isVisible) async {
     await _initFuture;
     await WebviewWinFloatingPlatform.instance.setVisibility(
       _webviewId,
@@ -665,5 +664,10 @@ class WinWebViewController {
       _webviewId,
       isEnable,
     );
+  }
+
+  Future<Uint8List?> capturePreview() async {
+    await _initFuture;
+    return await WebviewWinFloatingPlatform.instance.capturePreview(_webviewId);
   }
 }

@@ -7,7 +7,9 @@
 #include <regex>
 
 #include <windows.h>
+#include <shlobj.h>
 #include <WebView2.h>
+#include <WebView2EnvironmentOptions.h>
 
 #include <wrl.h>
 #include <wil/com.h>
@@ -40,7 +42,10 @@ class MyWebViewImpl : public MyWebView
 public:
     MyWebViewImpl(HWND hWnd,
         MyWebViewCreateParams params,
-        PCWSTR pwUserDataFolder);
+        PCWSTR pwUserDataFolder,
+        PCWSTR pwAdditionalBrowserArguments,
+        PCWSTR pwProxyUsername,
+        PCWSTR pwProxyPassword);
 
     virtual ~MyWebViewImpl() override;
 
@@ -86,6 +91,8 @@ public:
 
     void openDevTools() override;
 
+    void capturePreview(std::function<void(HRESULT, std::vector<uint8_t>)> callback) override;
+
 private:
     MyWebViewCreateParams m_params;
     bool m_isNowGoBackForward = false;
@@ -112,32 +119,138 @@ private:
     wil::com_ptr<ICoreWebView2Controller> m_pController;
     wil::com_ptr<ICoreWebView2Settings> m_pSettings;
     RECT m_bounds = { 0,0,0,0 };
+
+    // Proxy authentication credentials
+    std::wstring m_proxyUsername;
+    std::wstring m_proxyPassword;
+    int m_authRetryCount = 0;
+    bool m_authFailed = false;
+    std::wstring m_lastAuthUri;
 };
-wil::com_ptr<ICoreWebView2Environment> g_env;
 
 // --------------------------------------------------------------------------
 
 MyWebView* MyWebView::Create(HWND hWnd,
     MyWebViewCreateParams params,
-    PCWSTR pwUserDataFolder)
+    PCWSTR pwUserDataFolder,
+    PCWSTR pwAdditionalBrowserArguments,
+    PCWSTR pwProxyUsername,
+    PCWSTR pwProxyPassword)
 {
-    return new MyWebViewImpl(hWnd, params, pwUserDataFolder);
+    return new MyWebViewImpl(hWnd, params, pwUserDataFolder, pwAdditionalBrowserArguments, pwProxyUsername, pwProxyPassword);
 }
 
-HRESULT InitWebViewRuntime(PCWSTR pwUserDataFolder, std::function<void(HRESULT)> callback = nullptr)
+// Using CoreWebView2EnvironmentOptions from WebView2EnvironmentOptions.h (SDK provided)
+
+// Store environments per userDataFolder+browserArgs combination
+std::map<std::wstring, wil::com_ptr<ICoreWebView2Environment>> g_envMap;
+
+std::wstring GetEnvKey(PCWSTR pwUserDataFolder, const std::wstring& browserArgs) {
+    std::wstring key = pwUserDataFolder ? pwUserDataFolder : L"";
+    key += L"|";
+    key += browserArgs;
+    return key;
+}
+
+HRESULT InitWebViewRuntime(PCWSTR pwUserDataFolder, PCWSTR pwAdditionalBrowserArguments, std::function<void(HRESULT, ICoreWebView2Environment*)> callback = nullptr)
 {
-    if (g_env != NULL) {
-        if (callback != nullptr) callback(S_OK);
+    std::cout << "[webview_win_floating] === InitWebViewRuntime START ===" << std::endl;
+    std::wcout << L"[webview_win_floating] userDataFolder (input): " << (pwUserDataFolder ? pwUserDataFolder : L"(null)") << std::endl;
+    std::wcout << L"[webview_win_floating] browserArguments: " << (pwAdditionalBrowserArguments ? pwAdditionalBrowserArguments : L"(null)") << std::endl;
+
+    std::wstring browserArgs = pwAdditionalBrowserArguments ? pwAdditionalBrowserArguments : L"";
+
+    // Generate default userDataFolder if not provided
+    // WebView2 requires a valid userDataFolder when using additionalBrowserArguments
+    std::wstring userDataFolderStr;
+    PCWSTR effectiveUserDataFolder = pwUserDataFolder;
+
+    if ((pwUserDataFolder == nullptr || wcslen(pwUserDataFolder) == 0) && !browserArgs.empty()) {
+        // Create a default folder in LOCALAPPDATA directory (more reliable than TEMP)
+        wchar_t localAppData[MAX_PATH];
+        if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localAppData))) {
+            userDataFolderStr = std::wstring(localAppData) + L"\\webview_win_floating_proxy";
+        } else {
+            // Fallback to temp directory
+            wchar_t tempPath[MAX_PATH];
+            GetTempPathW(MAX_PATH, tempPath);
+            // Convert short path to long path
+            wchar_t longPath[MAX_PATH];
+            GetLongPathNameW(tempPath, longPath, MAX_PATH);
+            userDataFolderStr = std::wstring(longPath) + L"webview_win_floating_proxy";
+        }
+
+        // Create the directory if it doesn't exist
+        CreateDirectoryW(userDataFolderStr.c_str(), NULL);
+
+        effectiveUserDataFolder = userDataFolderStr.c_str();
+        std::wcout << L"[webview_win_floating] Generated default userDataFolder: " << effectiveUserDataFolder << std::endl;
+    }
+
+    std::wstring envKey = GetEnvKey(effectiveUserDataFolder, browserArgs);
+    std::wcout << L"[webview_win_floating] envKey: " << envKey << std::endl;
+    std::cout << "[webview_win_floating] g_envMap size: " << g_envMap.size() << std::endl;
+
+    // Reuse existing environment if one exists with same userDataFolder and browserArgs
+    auto it = g_envMap.find(envKey);
+    if (it != g_envMap.end() && it->second != nullptr) {
+        std::wcout << L"[webview_win_floating] REUSING existing environment for key: " << envKey << std::endl;
+        if (callback != nullptr) {
+            std::cout << "[webview_win_floating] Calling callback with existing env" << std::endl;
+            callback(S_OK, it->second.get());
+        }
         return S_OK;
     }
 
-    return CreateCoreWebView2EnvironmentWithOptions(nullptr, pwUserDataFolder, nullptr,
+    std::cout << "[webview_win_floating] No existing env found, creating NEW one..." << std::endl;
+
+    // Create environment options if we have additional browser arguments
+    // Using SDK-provided CoreWebView2EnvironmentOptions class
+    Microsoft::WRL::ComPtr<CoreWebView2EnvironmentOptions> envOptions;
+    ICoreWebView2EnvironmentOptions* options = nullptr;
+
+    if (!browserArgs.empty()) {
+        envOptions = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+        HRESULT hr = envOptions->put_AdditionalBrowserArguments(pwAdditionalBrowserArguments);
+        std::cout << "[webview_win_floating] put_AdditionalBrowserArguments result: 0x" << std::hex << hr << std::dec << std::endl;
+        options = envOptions.Get();
+        std::wcout << L"[webview_win_floating] Created options with AdditionalBrowserArguments: " << pwAdditionalBrowserArguments << std::endl;
+    } else {
+        std::cout << "[webview_win_floating] No browser arguments, options is nullptr" << std::endl;
+    }
+
+    std::cout << "[webview_win_floating] Calling CreateCoreWebView2EnvironmentWithOptions..." << std::endl;
+    std::wcout << L"[webview_win_floating] effectiveUserDataFolder: " << (effectiveUserDataFolder ? effectiveUserDataFolder : L"(null)") << std::endl;
+    std::cout << "[webview_win_floating] options pointer: " << options << std::endl;
+
+    HRESULT createResult = CreateCoreWebView2EnvironmentWithOptions(nullptr, effectiveUserDataFolder, options,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-            [callback](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
-                g_env = env;
-                if (callback != nullptr) callback(result);
-                return result;
+            [callback, envKey](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
+                std::cout << "[webview_win_floating] === Environment callback START ===" << std::endl;
+                std::cout << "[webview_win_floating] result HRESULT: 0x" << std::hex << result << std::dec << std::endl;
+                std::cout << "[webview_win_floating] env pointer: " << env << std::endl;
+
+                if (SUCCEEDED(result) && env != nullptr) {
+                    g_envMap[envKey] = env;
+                    std::wcout << L"[webview_win_floating] Environment STORED in map for key: " << envKey << std::endl;
+                    std::cout << "[webview_win_floating] g_envMap size now: " << g_envMap.size() << std::endl;
+                } else {
+                    std::cout << "[webview_win_floating] Environment creation FAILED!" << std::endl;
+                }
+
+                if (callback != nullptr) {
+                    std::cout << "[webview_win_floating] Calling user callback..." << std::endl;
+                    callback(result, env);
+                    std::cout << "[webview_win_floating] User callback returned" << std::endl;
+                }
+
+                std::cout << "[webview_win_floating] === Environment callback END, returning S_OK ===" << std::endl;
+                return S_OK;
             }).Get());
+
+    std::cout << "[webview_win_floating] CreateCoreWebView2EnvironmentWithOptions returned: 0x" << std::hex << createResult << std::dec << std::endl;
+    std::cout << "[webview_win_floating] === InitWebViewRuntime END ===" << std::endl;
+    return createResult;
 }
 
 HRESULT ReleaseWebViewRuntime()
@@ -147,18 +260,47 @@ HRESULT ReleaseWebViewRuntime()
 
 MyWebViewImpl::MyWebViewImpl(HWND hWnd,
     MyWebViewCreateParams params,
-    PCWSTR pwUserDataFolder = NULL) : m_params(params)
+    PCWSTR pwUserDataFolder = NULL,
+    PCWSTR pwAdditionalBrowserArguments = NULL,
+    PCWSTR pwProxyUsername = NULL,
+    PCWSTR pwProxyPassword = NULL) : m_params(params)
 {
-    InitWebViewRuntime(pwUserDataFolder, [=](HRESULT hr) -> void {
-        if (hr != S_OK) {
+    std::cout << "[webview_win_floating] === MyWebViewImpl CONSTRUCTOR START ===" << std::endl;
+    std::cout << "[webview_win_floating] hWnd: " << hWnd << std::endl;
+
+    // Store proxy credentials for BasicAuth handler
+    if (pwProxyUsername != nullptr) {
+        m_proxyUsername = pwProxyUsername;
+        std::wcout << L"[webview_win_floating] Proxy username set: " << m_proxyUsername << std::endl;
+    }
+    if (pwProxyPassword != nullptr) {
+        m_proxyPassword = pwProxyPassword;
+        std::cout << "[webview_win_floating] Proxy password set: (hidden)" << std::endl;
+    }
+
+    InitWebViewRuntime(pwUserDataFolder, pwAdditionalBrowserArguments, [=](HRESULT hr, ICoreWebView2Environment* env) -> void {
+        std::cout << "[webview_win_floating] === InitWebViewRuntime callback START ===" << std::endl;
+        std::cout << "[webview_win_floating] hr: 0x" << std::hex << hr << std::dec << std::endl;
+        std::cout << "[webview_win_floating] env: " << env << std::endl;
+
+        if (hr != S_OK || env == nullptr) {
+            std::cout << "[webview_win_floating] ERROR: hr != S_OK or env is null, calling onCreated with error" << std::endl;
             params.onCreated(hr, NULL);
+            std::cout << "[webview_win_floating] === InitWebViewRuntime callback END (error) ===" << std::endl;
             return;
         }
 
-        g_env->CreateCoreWebView2Controller(hWnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+        std::cout << "[webview_win_floating] Calling env->CreateCoreWebView2Controller..." << std::endl;
+        env->CreateCoreWebView2Controller(hWnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
             [=](HRESULT hr, ICoreWebView2Controller* controller) -> HRESULT {
+                std::cout << "[webview_win_floating] === Controller callback START ===" << std::endl;
+                std::cout << "[webview_win_floating] controller hr: 0x" << std::hex << hr << std::dec << std::endl;
+                std::cout << "[webview_win_floating] controller: " << controller << std::endl;
+
                 if (hr != S_OK) {
+                    std::cout << "[webview_win_floating] ERROR: Controller creation failed!" << std::endl;
                     params.onCreated(hr, NULL);
+                    std::cout << "[webview_win_floating] === Controller callback END (error) ===" << std::endl;
                     return hr;
                 }
 
@@ -174,7 +316,6 @@ MyWebViewImpl::MyWebViewImpl(HWND hWnd,
                 m_pWebview->add_NavigationStarting(
                     Callback<ICoreWebView2NavigationStartingEventHandler>(
                         [=](ICoreWebView2* sender, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
-
                             wil::unique_cotaskmem_string url;
                             args->get_Uri(&url);
                             auto utf16Url = std::wstring(url.get());
@@ -212,7 +353,7 @@ MyWebViewImpl::MyWebViewImpl(HWND hWnd,
 
                             if (m_hasNavigationDecision && userInitiated) {
                                 // for a user-initiated request,
-                                // cancel the request first, 
+                                // cancel the request first,
                                 // and ask dart code to grant/deny this request
                                 // if dart code deny, nothing happen
                                 // if dart code grant, call loadUrl() to load url again
@@ -226,7 +367,7 @@ MyWebViewImpl::MyWebViewImpl(HWND hWnd,
                                 UINT64 navigationId;
                                 args->get_NavigationId(&navigationId);
                                 __sendOnPageStarted(utf8Url, navigationId);
-                            }                            
+                            }
                             return S_OK;
                         }).Get(), NULL);
 
@@ -269,7 +410,7 @@ MyWebViewImpl::MyWebViewImpl(HWND hWnd,
                             args2->get_HttpStatusCode(&errCode);
 
                             if (errCode != 0) { // no http status code found
-                                params.onHttpError(url, errCode);                                    
+                                params.onHttpError(url, errCode);
                                 params.onPageFinished(url);
                                 return S_OK;
                             }
@@ -281,7 +422,7 @@ MyWebViewImpl::MyWebViewImpl(HWND hWnd,
                             // SSL certification error
                             switch (errCode) {
                                 case COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED:
-                                    // user cancel navigation, or deny navigation. 
+                                    // user cancel navigation, or deny navigation.
                                     // ignore this error
                                     return S_OK;
                                 case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT:
@@ -409,9 +550,69 @@ MyWebViewImpl::MyWebViewImpl(HWND hWnd,
                 hr = m_pWebview->add_PermissionRequested(
                     Callback<ICoreWebView2PermissionRequestedEventHandler>(
                         [=](ICoreWebView2* sender, ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT {
-                            askFlutterPermission(args, params.onAskPermission);                           
+                            askFlutterPermission(args, params.onAskPermission);
                             return S_OK;
                     }).Get(), NULL);
+
+                // Add BasicAuthenticationRequested handler for proxy authentication
+                // Requires ICoreWebView2_10 interface
+                auto webview2_10 = m_pWebview.try_query<ICoreWebView2_10>();
+                if (webview2_10 != nullptr) {
+                    std::cout << "[webview_win_floating] Registering BasicAuthenticationRequested handler" << std::endl;
+                    webview2_10->add_BasicAuthenticationRequested(
+                        Callback<ICoreWebView2BasicAuthenticationRequestedEventHandler>(
+                            [this](ICoreWebView2* sender, ICoreWebView2BasicAuthenticationRequestedEventArgs* args) -> HRESULT {
+                                wil::unique_cotaskmem_string uri;
+                                args->get_Uri(&uri);
+                                std::wstring currentUri(uri.get());
+
+                                // If auth already failed for this URI, cancel immediately
+                                if (m_authFailed && m_lastAuthUri == currentUri) {
+                                    args->put_Cancel(TRUE);
+                                    return S_OK;
+                                }
+
+                                // Reset counter if URI changed (new resource)
+                                if (m_lastAuthUri != currentUri) {
+                                    m_authRetryCount = 0;
+                                    m_authFailed = false;
+                                    m_lastAuthUri = currentUri;
+                                }
+
+                                m_authRetryCount++;
+                                std::cout << "[webview_win_floating] BasicAuthenticationRequested triggered (attempt " << m_authRetryCount << ")" << std::endl;
+                                std::wcout << L"[webview_win_floating] Auth requested for URI: " << currentUri << std::endl;
+
+                                // Prevent infinite retry loop - cancel after 3 attempts
+                                if (m_authRetryCount > 3) {
+                                    std::cout << "[webview_win_floating] Max auth retries reached, stopping navigation" << std::endl;
+                                    m_authFailed = true;
+                                    args->put_Cancel(TRUE);
+                                    // Stop the navigation to prevent further auth requests
+                                    if (m_pWebview != nullptr) {
+                                        m_pWebview->Stop();
+                                    }
+                                    return S_OK;
+                                }
+
+                                // Provide credentials for proxy authentication (from Dart side)
+                                if (!m_proxyUsername.empty() && !m_proxyPassword.empty()) {
+                                    wil::com_ptr<ICoreWebView2BasicAuthenticationResponse> response;
+                                    args->get_Response(&response);
+                                    if (response != nullptr) {
+                                        response->put_UserName(m_proxyUsername.c_str());
+                                        response->put_Password(m_proxyPassword.c_str());
+                                        std::wcout << L"[webview_win_floating] Provided proxy credentials (user: " << m_proxyUsername << L")" << std::endl;
+                                    }
+                                } else {
+                                    std::cout << "[webview_win_floating] No proxy credentials configured, showing default dialog" << std::endl;
+                                }
+
+                                return S_OK;
+                            }).Get(), nullptr);
+                } else {
+                    std::cout << "[webview_win_floating] ICoreWebView2_10 not available, BasicAuth handler not registered" << std::endl;
+                }
 
                 params.onCreated(hr, this);
                 return hr;
@@ -422,7 +623,7 @@ MyWebViewImpl::MyWebViewImpl(HWND hWnd,
 void MyWebViewImpl::askFlutterPermission(wil::com_ptr<ICoreWebView2PermissionRequestedEventArgs> args, OnAskPermissionFunc onAskPermission)
 {
     wil::com_ptr<ICoreWebView2Deferral> deferral;
-    COREWEBVIEW2_PERMISSION_KIND kind;                           
+    COREWEBVIEW2_PERMISSION_KIND kind;
     wil::unique_cotaskmem_string uri;
 
     args->get_PermissionKind(&kind);
@@ -471,7 +672,7 @@ void MyWebViewImpl::__sendOnPageStarted(std::string url, UINT64 navigationId) {
     m_navigationMap[navigationId] = url;
     m_params.onPageStarted(url);
 
-    // TODO: 
+    // TODO:
     // how to listen url change in WebView2 ?
     // we simulate 'onUrlChange' event here
     // but this cannot detect any url changed by javascript pushState()...
@@ -696,4 +897,42 @@ HRESULT MyWebViewImpl::resume()
 void MyWebViewImpl::openDevTools()
 {
     m_pWebview->OpenDevToolsWindow();
+}
+
+void MyWebViewImpl::capturePreview(std::function<void(HRESULT, std::vector<uint8_t>)> callback)
+{
+    IStream* stream = NULL;
+    HRESULT hr = CreateStreamOnHGlobal(NULL, TRUE, &stream);
+    if (FAILED(hr)) {
+        callback(hr, {});
+        return;
+    }
+
+    m_pWebview->CapturePreview(
+        COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+        stream,
+        Callback<ICoreWebView2CapturePreviewCompletedHandler>(
+            [stream, callback](HRESULT errorCode) -> HRESULT {
+                if (FAILED(errorCode)) {
+                    stream->Release();
+                    callback(errorCode, {});
+                    return S_OK;
+                }
+
+                STATSTG stat;
+                stream->Stat(&stat, STATFLAG_NONAME);
+                ULONG size = stat.cbSize.LowPart;
+
+                LARGE_INTEGER li;
+                li.QuadPart = 0;
+                stream->Seek(li, STREAM_SEEK_SET, NULL);
+
+                std::vector<uint8_t> buffer(size);
+                ULONG bytesRead;
+                stream->Read(buffer.data(), size, &bytesRead);
+
+                stream->Release();
+                callback(S_OK, buffer);
+                return S_OK;
+            }).Get());
 }
