@@ -63,21 +63,39 @@ WebviewWinFloatingPlugin::~WebviewWinFloatingPlugin() {
 
 void WebviewWinFloatingPlugin::createWebview(const flutter::MethodCall<flutter::EncodableValue> &method_call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> &result,
-    int webviewId, std::string url, std::string userDataFolder) {
+    int webviewId, std::string url, std::string userDataFolder, std::string additionalBrowserArguments,
+    std::string proxyUsername, std::string proxyPassword) {
+
+  std::cout << "[webview_win_floating] === createWebview START ===" << std::endl;
+  std::cout << "[webview_win_floating] webviewId: " << webviewId << std::endl;
+  std::cout << "[webview_win_floating] url: " << url << std::endl;
+  std::cout << "[webview_win_floating] userDataFolder: " << userDataFolder << std::endl;
+  std::cout << "[webview_win_floating] additionalBrowserArguments: " << additionalBrowserArguments << std::endl;
+  std::cout << "[webview_win_floating] proxyUsername: " << proxyUsername << std::endl;
+  std::cout << "[webview_win_floating] proxyPassword: " << (proxyPassword.empty() ? "(empty)" : "(set)") << std::endl;
 
   std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>> shared_result = std::move(result);
   MyWebViewCreateParams params;
 
   params.onCreated = [=](HRESULT hr, MyWebView *webview) -> void {
+    std::cout << "[webview_win_floating] === onCreated callback START ===" << std::endl;
+    std::cout << "[webview_win_floating] hr: 0x" << std::hex << hr << std::dec << std::endl;
+    std::cout << "[webview_win_floating] webview: " << webview << std::endl;
+
     if (webview != NULL) {
       m_webviewMap[webviewId] = webview;
-      std::cout << "[webview] native create: id = " << webviewId << std::endl;
+      std::cout << "[webview_win_floating] SUCCESS: native create id = " << webviewId << std::endl;
       if (!url.empty()) webview->loadUrl(toWideString(url));
+      std::cout << "[webview_win_floating] Calling shared_result->Success..." << std::endl;
       shared_result->Success(flutter::EncodableValue(true));
+      std::cout << "[webview_win_floating] shared_result->Success returned" << std::endl;
     } else {
-      std::cerr << "[webview] native create failed. result = " << hr << std::endl;
+      std::cerr << "[webview_win_floating] FAILED: native create failed. result = 0x" << std::hex << hr << std::dec << std::endl;
+      std::cout << "[webview_win_floating] Calling shared_result->Error..." << std::endl;
       shared_result->Error("[webview] native create failed.");
+      std::cout << "[webview_win_floating] shared_result->Error returned" << std::endl;
     }
+    std::cout << "[webview_win_floating] === onCreated callback END ===" << std::endl;
   };
 
   params.onNavigationRequest = [=](int requestId, std::string url, bool isNewWindow) -> void {
@@ -189,7 +207,36 @@ void WebviewWinFloatingPlugin::createWebview(const flutter::MethodCall<flutter::
     }
   }
 
-  MyWebView::Create(m_nativeHWND, params, pwUserDataFolder);
+  PCWSTR pwAdditionalBrowserArguments = NULL;
+  WCHAR wAdditionalBrowserArguments[2048];
+  if (!additionalBrowserArguments.empty()) {
+    auto convResult = MultiByteToWideChar(CP_UTF8, 0, additionalBrowserArguments.c_str(), -1, wAdditionalBrowserArguments, sizeof(wAdditionalBrowserArguments) / sizeof(WCHAR));
+    if (convResult < 0) {
+      std::cout << "[webview_win_floating] native convert additionalBrowserArguments to utf16 (WCHAR*) failed: args = " << additionalBrowserArguments << std::endl;
+    } else {
+      pwAdditionalBrowserArguments = wAdditionalBrowserArguments;
+    }
+  }
+
+  PCWSTR pwProxyUsername = NULL;
+  WCHAR wProxyUsername[256];
+  if (!proxyUsername.empty()) {
+    auto convResult = MultiByteToWideChar(CP_UTF8, 0, proxyUsername.c_str(), -1, wProxyUsername, sizeof(wProxyUsername) / sizeof(WCHAR));
+    if (convResult > 0) {
+      pwProxyUsername = wProxyUsername;
+    }
+  }
+
+  PCWSTR pwProxyPassword = NULL;
+  WCHAR wProxyPassword[256];
+  if (!proxyPassword.empty()) {
+    auto convResult = MultiByteToWideChar(CP_UTF8, 0, proxyPassword.c_str(), -1, wProxyPassword, sizeof(wProxyPassword) / sizeof(WCHAR));
+    if (convResult > 0) {
+      pwProxyPassword = wProxyPassword;
+    }
+  }
+
+  MyWebView::Create(m_nativeHWND, params, pwUserDataFolder, pwAdditionalBrowserArguments, pwProxyUsername, pwProxyPassword);
 }
 
 void WebviewWinFloatingPlugin::destroyAllWebViews() {
@@ -226,7 +273,10 @@ void WebviewWinFloatingPlugin::HandleMethodCall(
   if (isCreateCall) {
     auto url = std::get<std::string>(arguments[flutter::EncodableValue("url")]);
     auto userDataFolder = std::get<std::string>(arguments[flutter::EncodableValue("userDataFolder")]);
-    createWebview(method_call, result, webviewId, url, userDataFolder);
+    auto additionalBrowserArguments = std::get<std::string>(arguments[flutter::EncodableValue("additionalBrowserArguments")]);
+    auto proxyUsername = std::get<std::string>(arguments[flutter::EncodableValue("proxyUsername")]);
+    auto proxyPassword = std::get<std::string>(arguments[flutter::EncodableValue("proxyPassword")]);
+    createWebview(method_call, result, webviewId, url, userDataFolder, additionalBrowserArguments, proxyUsername, proxyPassword);
   } else if (method_call.method_name().compare("setHasNavigationDecision") == 0) {
     auto hasNavigationDecision = std::get<bool>(arguments[flutter::EncodableValue("hasNavigationDecision")]);
     webview->setHasNavigationDecision(hasNavigationDecision);
@@ -368,6 +418,15 @@ void WebviewWinFloatingPlugin::HandleMethodCall(
   } else if (method_call.method_name().compare("openDevTools") == 0) {
     webview->openDevTools();
     result->Success();
+  } else if (method_call.method_name().compare("capturePreview") == 0) {
+    auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(std::move(result));
+    webview->capturePreview([shared_result](HRESULT hr, std::vector<uint8_t> data) {
+      if (FAILED(hr)) {
+        shared_result->Error("capturePreview", "CapturePreview failed");
+      } else {
+        shared_result->Success(flutter::EncodableValue(data));
+      }
+    });
   } else {
     result->NotImplemented();
   }

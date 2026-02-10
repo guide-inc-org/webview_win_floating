@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include <functional>
 
 #include <windows.h>
@@ -36,7 +37,10 @@ class MyWebView
 public:
 	static MyWebView* Create(HWND hWnd,
 		MyWebViewCreateParams params,
-		PCWSTR pwUserDataFolder = NULL);
+		PCWSTR pwUserDataFolder = NULL,
+		PCWSTR pwAdditionalBrowserArguments = NULL,
+		PCWSTR pwProxyUsername = NULL,
+		PCWSTR pwProxyPassword = NULL);
 
 	//MyWebView();
 	virtual ~MyWebView() {};
@@ -79,4 +83,6 @@ public:
 	virtual void grantPermission(int deferralId, BOOL isGranted) = 0;
 
 	virtual void openDevTools() = 0;
+
+	virtual void capturePreview(std::function<void(HRESULT, std::vector<uint8_t>)> callback) = 0;
 };

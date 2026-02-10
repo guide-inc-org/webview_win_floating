@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
@@ -39,6 +40,9 @@ abstract class WebviewWinFloatingPlatform extends PlatformInterface {
     int webviewId, {
     String? initialUrl,
     String? userDataFolder,
+    String? additionalBrowserArguments,
+    String? proxyUsername,
+    String? proxyPassword,
   }) {
     throw UnimplementedError();
   }
@@ -179,6 +183,10 @@ abstract class WebviewWinFloatingPlatform extends PlatformInterface {
   }
 
   Future<void> enableStatusBar(int webviewId, bool isEnable) {
+    throw UnimplementedError();
+  }
+
+  Future<Uint8List?> capturePreview(int webviewId) {
     throw UnimplementedError();
   }
 }
