@@ -255,6 +255,7 @@ HRESULT InitWebViewRuntime(PCWSTR pwUserDataFolder, PCWSTR pwAdditionalBrowserAr
 
 HRESULT ReleaseWebViewRuntime()
 {
+    g_envMap.clear();
     return S_OK;
 }
 
@@ -309,6 +310,8 @@ MyWebViewImpl::MyWebViewImpl(HWND hWnd,
                 m_pController = controller;
 
                 m_pSettings->put_AreDefaultContextMenusEnabled(FALSE);
+                m_pSettings->put_IsStatusBarEnabled(FALSE);
+
 #ifndef _DEBUG
                 m_pSettings->put_AreDevToolsEnabled(FALSE);
 #endif
@@ -653,7 +656,12 @@ void MyWebViewImpl::grantPermission(int deferralId, BOOL isGranted)
 
 MyWebViewImpl::~MyWebViewImpl()
 {
-    m_pController->Close();
+    if (m_pController) {
+        m_pController->Close();
+    }
+    m_pSettings = nullptr;
+    m_pWebview = nullptr;
+    m_pController = nullptr;
     std::cout << "[webview_win_floating] MyWebViewImpl::~MyWebViewImpl()" << std::endl;
 }
 
