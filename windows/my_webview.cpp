@@ -768,7 +768,15 @@ HRESULT MyWebViewImpl::getBounds(RECT& bounds)
 
 HRESULT MyWebViewImpl::setVisible(bool isVisible)
 {
-    return m_pController->put_IsVisible(isVisible);
+    HRESULT hr = m_pController->put_IsVisible(isVisible);
+    // Re-applying put_Bounds forces the DirectComposition swap chain to
+    // re-composite after a hide→show transition. Without this, the surface
+    // can remain at its initial black clear state even though WebView2 has
+    // fully rendered the page (SBIFX-10580).
+    if (isVisible && SUCCEEDED(hr) && m_bounds.right > m_bounds.left) {
+        m_pController->put_Bounds(m_bounds);
+    }
+    return hr;
 }
 
 HRESULT MyWebViewImpl::setBackgroundColor(int32_t argb)
